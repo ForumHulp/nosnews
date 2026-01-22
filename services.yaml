@@ -1,0 +1,15 @@
+speak_news:
+  name: Speak news
+  description: Speak the current news articles via TTS.
+
+next_item:
+  name: Next article
+  description: Skip to the next article.
+
+previous_item:
+  name: Previous article
+  description: Go back to the previous article.
+
+refresh_now:
+  name: Refresh feed
+  description: Immediately refresh the news feed.

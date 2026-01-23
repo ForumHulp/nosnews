@@ -1,0 +1,39 @@
+{
+"config": {
+"step": {
+"user": {
+"title": "NOS News",
+"description": "Configure the NOS News integration",
+"data": {
+"feeds": "News feeds",
+"articles_per_feed": "Articles per feed",
+"inclusions": "Additional article fields",
+"tts_service": "TTS service",
+"media_player_entity": "Media player",
+"pause_seconds": "Pause between articles (seconds)",
+"radio_journaal": "Play NOS Radio Journaal intro",
+"dwains_notifications": "Enable Dwains Dashboard notifications"
+}
+}
+},
+"error": {
+"cannot_fetch_feeds": "Unable to fetch NOS feeds. Please try again later."
+}
+},
+"options": {
+"step": {
+"init": {
+"data": {
+"feeds": "News feeds",
+"articles_per_feed": "Articles per feed",
+"inclusions": "Additional article fields",
+"tts_service": "TTS service",
+"media_player_entity": "Media player",
+"pause_seconds": "Pause between articles (seconds)",
+"radio_journaal": "Play NOS Radio Journaal intro",
+"dwains_notifications": "Enable Dwains Dashboard notifications"
+}
+}
+}
+}
+}

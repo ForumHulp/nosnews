@@ -15,7 +15,6 @@ from .const import DOMAIN
 ICON = "mdi:newspaper-variant"
 _LOGGER = logging.getLogger(__name__)
 
-PLAY_INTERVAL = 5  # seconds per article
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the NOS News media player entity."""
@@ -37,8 +36,12 @@ class NOSNewsPlayer(CoordinatorEntity, MediaPlayerEntity):
     def __init__(self, coordinator, entry):
         self._playing = False
         self._play_task: asyncio.Task | None = None
-        super().__init__(coordinator)
         self.entry = entry
+
+        options = {**entry.data, **entry.options}
+        self._pause_seconds = options.get("pause_seconds", 5)
+
+        super().__init__(coordinator)
 
     @property
     def unique_id(self):
@@ -155,7 +158,7 @@ class NOSNewsPlayer(CoordinatorEntity, MediaPlayerEntity):
     async def _play_next_article_loop(self):
         try:
             while self._playing and self.coordinator.data:
-                await asyncio.sleep(PLAY_INTERVAL)
+                await asyncio.sleep(self._pause_seconds)
                 if not self._playing:
                     break
                 self.coordinator.index = (

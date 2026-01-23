@@ -158,7 +158,7 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
                         "notification_id": f"nosnews_{self.entry.entry_id}",
                         "title": "NOS News",
                         "message": f"{html.escape(latest['feed_name'])} | "
-                                   f"{html.escape(latest['title'])}",
+                                   f"{latest['title']}",
                     },
                     blocking=True,
                 )
@@ -170,5 +170,5 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
     def _dwains_listener(self, event):
         data = event.data
         if data.get("notification_id") == f"nosnews_{self.entry.entry_id}":
-            _LOGGER.warning("Dwains notification dismissed")
+            _LOGGER.debug("Dwains notification dismissed")
             self._current_notification_active = False

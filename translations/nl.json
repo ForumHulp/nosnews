@@ -1,0 +1,40 @@
+{
+"title": "NOS Nieuws",
+"config": {
+"step": {
+"user": {
+"title": "NOS Nieuws",
+"description": "Configureer welke NOS-nieuwsfeeds worden gebruikt en hoe artikelen worden gepresenteerd.",
+"data": {
+"feeds": "Nieuwsfeeds",
+"articles_per_feed": "Aantal artikelen per feed",
+"inclusions": "Extra artikelvelden",
+"tts_service": "Tekst-naar-spraakdienst",
+"media_player_entity": "Media player-entiteit",
+"pause_seconds": "Pauze tussen artikelen (seconden)",
+"radio_journaal": "Speel NOS Radio Journaal vóór de headlines",
+"dwains_notifications": "Schakel Dwains Dashboard-meldingen in"
+}
+}
+},
+"error": {
+"cannot_fetch_feeds": "Kan de lijst met NOS-feeds niet ophalen."
+}
+},
+"options": {
+"step": {
+"init": {
+"data": {
+"feeds": "Nieuwsfeeds",
+"articles_per_feed": "Aantal artikelen per feed",
+"inclusions": "Extra artikelvelden",
+"tts_service": "Tekst-naar-spraakdienst",
+"media_player_entity": "Media player-entiteit",
+"pause_seconds": "Pauze tussen artikelen (seconden)",
+"radio_journaal": "Speel NOS Radio Journaal vóór de headlines",
+"dwains_notifications": "Schakel Dwains Dashboard-meldingen in"
+}
+}
+}
+}
+}

@@ -5,29 +5,27 @@ import hashlib
 import html
 import re
 import logging
-import time
 import feedparser
+from dateutil import parser
 
 from datetime import timedelta
-from homeassistant.helpers.update_coordinator import (
-    DataUpdateCoordinator,
-    UpdateFailed,
-)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
-from collections import deque
+from homeassistant.helpers.event import async_call_later
 
 _LOGGER = logging.getLogger(__name__)
 
 REFRESH_INTERVAL = 1800
-SUMMARY_MAX_LENGTH = 400
-
+DW_DISMISS_DELAY = 10.0
 DW_EVENT = "dwains_dashboard_notifications_updated"
+
 
 def clean_html(text: str) -> str:
     if not text:
         return ""
     text = html.unescape(text)
     return re.sub("<[^<]+?>", "", text).strip()
+
 
 class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
     def __init__(self, hass, entry):
@@ -36,8 +34,7 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
 
         self.feed_urls = entry.data["feed_urls"]
         self.articles_per_feed = entry.options.get(
-            "articles_per_feed",
-            entry.data.get("articles_per_feed", 5),
+            "articles_per_feed", entry.data.get("articles_per_feed", 5)
         )
 
         self._cached_entries: list[dict] = []
@@ -45,11 +42,12 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
 
         # Dwains state
         self._dwains_enabled = entry.options.get(
-            "dwains_notifications",
-            entry.data.get("dwains_notifications", True),
+            "dwains_notifications", entry.data.get("dwains_notifications", True)
         )
         self._current_notification_active = False
-        self._seen_articles = deque(maxlen=100)
+        self._seen_articles = set()
+        self._pending_latest_article: dict | None = None
+        self._last_shown_published: float | None = None
 
         super().__init__(
             hass,
@@ -78,6 +76,7 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
             self.index = (self.index - 1) % len(self.data)
 
     # ---------------- UPDATE ---------------- #
+
     def _extract_image(self, entry):
         if "enclosures" in entry and entry.get("enclosures"):
             return entry.enclosures[0].get("url")
@@ -95,10 +94,24 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         return None
 
     async def _async_update_data(self):
-        entries, latest = await self.hass.async_add_executor_job(self._fetch)
+        self.last_update = dt_util.now()
+        _LOGGER.warning("NOSNews async update running")
+        entries = await self.hass.async_add_executor_job(self._fetch)
 
-        if latest:
-            self._handle_dwains_notification(latest)
+        if self._dwains_enabled and entries:
+            latest = entries[0]
+            latest_id = self._article_id(latest)
+
+            # Show the newest article if it hasn't been seen yet
+            if latest_id not in self._seen_articles:
+                if self._current_notification_active:
+                    self._pending_latest_article = latest
+                else:
+                    self.hass.loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(
+                            self._async_create_dwains_notification(latest)
+                        )
+                    )
 
         self.index = 0
         return entries
@@ -113,62 +126,115 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
                     {
                         "title": entry.get("title", ""),
                         "link": entry.get("link", ""),
-                        "entity_picture": self._extract_image(entry) or "https://www.home-assistant.io/images/favicon-192x192-full.png",
-                        "feed_name": url.rstrip("/").split("/")[-1].replace("nosnieuws", "").replace("-", " ").capitalize(),
+                        "entity_picture": self._extract_image(entry)
+                        or "https://www.home-assistant.io/images/favicon-192x192-full.png",
+                        "feed_name": url.rstrip("/")
+                        .split("/")[-1]
+                        .replace("nosnieuws", "")
+                        .replace("-", " ")
+                        .capitalize(),
                         "summary": self._extract_summary(entry),
                         "published_parsed": entry.get("published_parsed"),
+                        "published": entry.get("published"),
                     }
                 )
 
         if not entries:
-            return self._cached_entries, None
+            return self._cached_entries
 
+        # Sort by published time using feed's original string (respects timezone/DST)
         entries.sort(
-            key=lambda e: time.mktime(e["published_parsed"])
-            if isinstance(e.get("published_parsed"), tuple)
+            key=lambda e: parser.parse(e["published"]).timestamp()
+            if e.get("published")
             else 0,
             reverse=True,
         )
 
         self._cached_entries = entries
-        return entries, entries[0]  # ⬅️ latest article
-
+        return entries
 
     # ---------------- DWAIN'S ---------------- #
 
-    def _handle_dwains_notification(self, latest):
+    def _article_id(self, article) -> str:
+        raw = f"{article.get('title','')}{article.get('feed_name','')}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    async def _async_create_dwains_notification(self, article):
+        """Create Dwains notification asynchronously (thread-safe)."""
         if not self._dwains_enabled or self._current_notification_active:
             return
 
-        raw_id = f"{latest.get('title','')}{latest.get('feed_name','')}"
-        article_id = hashlib.md5(raw_id.encode()).hexdigest()
-
+        article_id = self._article_id(article)
         if article_id in self._seen_articles:
             return
 
-        self._seen_articles.append(article_id)
+        self._seen_articles.add(article_id)
         self._current_notification_active = True
 
-        if self.hass.services.has_service("dwains_dashboard", "notification_create"):
-            self.hass.async_create_task(
-                self.hass.services.async_call(
-                    "dwains_dashboard",
-                    "notification_create",
-                    {
-                        "notification_id": f"nosnews_{self.entry.entry_id}",
-                        "title": "NOS News",
-                        "message": f"{html.escape(latest['feed_name'])} | "
-                                   f"{latest['title']}",
-                    },
-                    blocking=True,
-                )
-            )
+        if article.get("published"):
+            self._last_shown_published = parser.parse(article["published"]).timestamp()
         else:
-            # Service not ready yet, maybe retry later
-            pass
+            import time
+            self._last_shown_published = time.time()
+
+        if not self.hass.services.has_service("dwains_dashboard", "notification_create"):
+            return
+
+        published_time = None
+        if article.get("published"):
+            dt = parser.parse(article["published"])
+            published_time = dt.strftime("%H:%M o'clock")
+
+        time_prefix = f"{published_time} – " if published_time else ""
+
+        await self.hass.services.async_call(
+            "dwains_dashboard",
+            "notification_create",
+            {
+                "notification_id": f"nosnews_{self.entry.entry_id}",
+                "title": "NOS News",
+                "message": f"{html.escape(article['feed_name'])} | {time_prefix}{article['title']}",
+            },
+            blocking=True,
+        )
 
     def _dwains_listener(self, event):
+        """Handle Dwains notification dismissed events."""
         data = event.data
-        if data.get("notification_id") == f"nosnews_{self.entry.entry_id}":
-            _LOGGER.debug("Dwains notification dismissed")
-            self._current_notification_active = False
+        if data.get("notification_id") != f"nosnews_{self.entry.entry_id}":
+            return
+
+        self._current_notification_active = False
+
+        # Schedule async-safe next notification
+        def _schedule_show_next():
+            async def _show_next(_now=None):
+                if self._current_notification_active:
+                    return
+
+                # Show pending latest article first
+                if self._pending_latest_article:
+                    article = self._pending_latest_article
+                    self._pending_latest_article = None
+                    await self._async_create_dwains_notification(article)
+                    return
+
+                # Then show next unseen newer article
+                if self._last_shown_published:
+                    for article in self._cached_entries:
+                        published_ts = (
+                            parser.parse(article["published"]).timestamp()
+                            if article.get("published")
+                            else 0
+                        )
+                        article_id = self._article_id(article)
+                        if (
+                            published_ts > self._last_shown_published
+                            and article_id not in self._seen_articles
+                        ):
+                            await self._async_create_dwains_notification(article)
+                            break
+
+            asyncio.run_coroutine_threadsafe(_show_next(), self.hass.loop)
+
+        async_call_later(self.hass, DW_DISMISS_DELAY, lambda _: _schedule_show_next())

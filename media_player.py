@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
 
 from homeassistant.components.media_player import (
@@ -9,7 +10,9 @@ from homeassistant.components.media_player import (
     MediaPlayerState,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
+from datetime import datetime
+from homeassistant.util import dt as dt_util
+from homeassistant.util.dt import as_local
 from .const import DOMAIN
 
 ICON = "mdi:newspaper-variant"
@@ -86,9 +89,21 @@ class NOSNewsPlayer(CoordinatorEntity, MediaPlayerEntity):
             return {}
 
         article = self.coordinator.data[self.coordinator.index]
+
+        published_time = None
+        if article.get("published_parsed"):
+            # Convert struct_time to timestamp assuming it's UTC
+            dt = datetime.fromtimestamp(calendar.timegm(article["published_parsed"]))
+            # Don't convert to local timezone; keep the feed time
+            published_time = dt.strftime("%H:%M o'clock")
+
         attrs = {
             "article_number": f"{self.coordinator.index + 1}/{len(self.coordinator.data)}",
+            "last_refresh": self.coordinator.last_update.strftime("%Y-%m-%d %H:%M:%S")
         }
+
+        if published_time:
+            attrs["published_time"] = published_time
 
         inclusions = self.entry.options.get("inclusions") or self.entry.data.get("inclusions", [])
         for extra in ["feed_name", "entity_picture"]:

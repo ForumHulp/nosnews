@@ -24,6 +24,20 @@ def split_text(text: str, max_len: int = 200):
         chunks.append(current.strip())
     return chunks
 
+async def speak_unseen_news(hass, entry, coordinator):
+    unseen = coordinator.get_unseen_articles()
+    if not unseen:
+        _LOGGER.info("No unseen NOS articles to speak")
+        return
+
+    # Temporarily swap coordinator.data
+    original_data = coordinator.data
+    coordinator.data = unseen
+
+    try:
+        await speak_news(hass, entry, coordinator)
+    finally:
+        coordinator.data = original_data
 
 async def speak_news(hass, entry, coordinator):
     """

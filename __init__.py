@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 from .const import DOMAIN
 from .coordinator import NOSNewsCoordinator
-from .speech import speak_news
+from .speech import speak_news, speak_unseen_news
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,12 +37,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.async_set_updated_data(coordinator.data)
 
     async def handle_refresh_now(call: ServiceCall):
-        await coordinator.async_request_refresh()
+        await coordinator.async_refresh_now()
+
+    async def handle_speak_unseen(call: ServiceCall):
+        await speak_unseen_news(hass, entry, coordinator)
 
     hass.services.async_register(DOMAIN, "speak_news", handle_speak_news)
     hass.services.async_register(DOMAIN, "next_item", handle_next_item)
     hass.services.async_register(DOMAIN, "previous_item", handle_previous_item)
     hass.services.async_register(DOMAIN, "refresh_now", handle_refresh_now)
+    hass.services.async_register(DOMAIN, "speak_unseen", handle_speak_unseen)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

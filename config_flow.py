@@ -14,6 +14,7 @@ from . import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 NOS_FEEDS_URL = "https://nos.nl/feeds"
+VOORWAARHEID_URL = "https://voorwaarheid.nl/category/informeren/feed"
 
 EXCLUDED_FIELDS = {
     "guidislink",
@@ -22,6 +23,10 @@ EXCLUDED_FIELDS = {
     "published_parsed",
     "title_detail",
     "summary_detail",
+    "author",
+    "author_detail",
+    "authors",
+    "tags"
 }
 
 CORE_FIELDS = {
@@ -51,6 +56,7 @@ async def fetch_nos_feeds(hass):
 
         feeds[title.capitalize()] = url
 
+    feeds["Voorwaarheid"] = VOORWAARHEID_URL
     return feeds
 
 
@@ -58,24 +64,19 @@ async def get_available_inclusions(hass, feed_urls):
     if not feed_urls:
         return []
 
-    try:
-        parsed = await hass.async_add_executor_job(
-            feedparser.parse, feed_urls[0]
-        )
-    except Exception:
-        return []
-
     fields = set()
-    for entry in parsed.entries[:3]:
-        fields.update(entry.keys())
+    for url in feed_urls:
+        try:
+            parsed = await hass.async_add_executor_job(feedparser.parse, url)
+            for entry in parsed.entries[:3]:
+                fields.update(entry.keys())
+        except Exception:
+            continue
 
     fields -= EXCLUDED_FIELDS
     fields -= CORE_FIELDS
-
-    # Always allow 'feed_name' and 'entity_picture' for multi-select
     fields.add("feed_name")
     fields.add("entity_picture")
-
     return sorted(fields)
 
 
@@ -89,17 +90,17 @@ class NOSNewsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not feeds:
             errors["base"] = "cannot_fetch_feeds"
 
-        feeds_select = {k: k for k in feeds}
+        feeds_select = {name: name for name in feeds}
 
         if user_input:
             selected = user_input["feeds"]
-            feed_urls = [feeds[name] for name in selected]
+            feeds_data = {name: feeds[name] for name in selected}
 
             inclusions_available = await get_available_inclusions(
-                self.hass, feed_urls
+                self.hass, list(feeds_data.values())
             )
 
-            user_input["feed_urls"] = feed_urls
+            user_input["feeds_data"] = feeds_data
             user_input["inclusions"] = [
                 i for i in user_input.get("inclusions", [])
                 if i in inclusions_available
@@ -159,20 +160,20 @@ class NOSNewsOptionsFlow(config_entries.OptionsFlow):
         feeds = await fetch_nos_feeds(self.hass)
         current = {**self.entry.data, **self.entry.options}
 
-        feeds_select = {k: k for k in feeds}
+        feeds_select = {name: name for name in feeds}
+        current_feed_urls = current.get("feeds_data", {})
         selected_feeds = [
             name for name, url in feeds.items()
-            if url in current.get("feed_urls", [])
+            if url in current_feed_urls.values()
         ]
 
-        inclusions_available = await get_available_inclusions(
-            self.hass, current.get("feed_urls", [])
-        )
+        current_feed_urls_list = list(current_feed_urls.values())
+        inclusions_available = await get_available_inclusions(self.hass, current_feed_urls_list)
 
         if user_input:
-            user_input["feed_urls"] = [
-                feeds[name] for name in user_input["feeds"]
-            ]
+            feeds_data = {name: feeds[name] for name in user_input["feeds"]}
+            user_input["feeds_data"] = feeds_data
+
             user_input["inclusions"] = [
                 i for i in user_input.get("inclusions", [])
                 if i in inclusions_available

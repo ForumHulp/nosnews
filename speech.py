@@ -3,11 +3,9 @@ import html
 import re
 import logging
 
+from .const import MAX_TTS_TITLE, MAX_TTS_SUMMARY
+
 _LOGGER = logging.getLogger(__name__)
-
-MAX_TTS_TITLE = 180
-MAX_TTS_SUMMARY = 220
-
 
 def split_text(text: str, max_len: int = 200):
     """Split text into TTS-safe chunks without breaking words."""

@@ -11,13 +11,13 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from datetime import datetime
+import locale
+locale.setlocale(locale.LC_ALL, '')
 from homeassistant.util import dt as dt_util
 from homeassistant.util.dt import as_local
-from .const import DOMAIN
+from .const import DOMAIN, ICON
 
-ICON = "mdi:newspaper-variant"
 _LOGGER = logging.getLogger(__name__)
-
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the NOS News media player entity."""
@@ -91,11 +91,13 @@ class NOSNewsPlayer(CoordinatorEntity, MediaPlayerEntity):
         article = self.coordinator.data[self.coordinator.index]
 
         published_time = None
+        published_date = None
         if article.get("published_parsed"):
             # Convert struct_time to timestamp assuming it's UTC
             dt = datetime.fromtimestamp(calendar.timegm(article["published_parsed"]))
             # Don't convert to local timezone; keep the feed time
             published_time = dt.strftime("%H:%M o'clock")
+            published_date = dt.strftime("%A, %B %d, %Y")
 
         attrs = {
             "article_number": f"{self.coordinator.index + 1}/{len(self.coordinator.data)}",
@@ -104,6 +106,8 @@ class NOSNewsPlayer(CoordinatorEntity, MediaPlayerEntity):
 
         if published_time:
             attrs["published_time"] = published_time
+        if published_date:
+            attrs["published_date"] = published_date
 
         inclusions = self.entry.options.get("inclusions") or self.entry.data.get("inclusions", [])
         for extra in ["feed_name", "entity_picture"]:

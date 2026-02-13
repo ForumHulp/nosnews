@@ -3,26 +3,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
-import re
 import logging
+import re
+from collections import deque
+from datetime import timedelta
+
 import feedparser
 from dateutil import parser
-from collections import deque
 
-from datetime import timedelta
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
-from homeassistant.helpers.event import async_call_later
+from .const import REFRESH_INTERVAL, DW_DISMISS_DELAY, DW_EVENT, MAX_QUEUE_SIZE
 
 _LOGGER = logging.getLogger(__name__)
-
-
-REFRESH_INTERVAL = 1800
-DW_DISMISS_DELAY = 5.0
-DW_EVENT = "dwains_dashboard_notifications_updated"
-
-MAX_QUEUE_SIZE = 10   # Max unseen articles kept in memory
-
 
 def clean_html(text: str) -> str:
     if not text:
@@ -50,13 +44,13 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         self._dwains_enabled = entry.options.get(
             "dwains_notifications", entry.data.get("dwains_notifications", True)
         )
-
         self._current_notification_active = False
         self._seen_articles: set[str] = set()
         self._last_shown_published: float | None = None
 
         # Bounded queue for new articles
         self._notification_queue: deque[dict] = deque(maxlen=MAX_QUEUE_SIZE)
+
         self._block_start = 23
         self._block_end = 6
         self._force_refresh = False
@@ -80,20 +74,17 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
     def _is_blocked_now(self) -> bool:
         """Return True if feed fetching is blocked by schedule."""
         if self._block_start is None or self._block_end is None:
-            return False  # feature disabled / not configured
+            return False
 
         now = dt_util.as_local(dt_util.utcnow())
         hour = now.hour
 
-        # Normal range (e.g., 08 → 22)
         if self._block_start < self._block_end:
             return self._block_start <= hour < self._block_end
 
-        # Overnight range (e.g., 22 → 06)
         if self._block_start > self._block_end:
             return hour >= self._block_start or hour < self._block_end
 
-        # start == end → treat as disabled
         return False
 
     # ---------------- INDEX CONTROL ---------------- #
@@ -109,48 +100,41 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
     # ---------------- UPDATE ---------------- #
 
     def _extract_image(self, entry):
-        # 1. Enclosures (best case)
         if entry.get("enclosures"):
             url = entry.enclosures[0].get("url")
             if url:
                 return url
 
-        # 2. media:content
         media = entry.get("media_content")
         if media and isinstance(media, list):
             url = media[0].get("url")
             if url:
                 return url
 
-        # 3. media:thumbnail
         thumb = entry.get("media_thumbnail")
         if thumb and isinstance(thumb, list):
             url = thumb[0].get("url")
             if url:
                 return url
 
-        # 4. <img> inside description / summary (WordPress feeds)
-        html = entry.get("description") or entry.get("summary")
-        if html:
-            match = re.search(r'<img[^>]+src="([^">]+)"', html)
+        html_text = entry.get("description") or entry.get("summary")
+        if html_text:
+            match = re.search(r'<img[^>]+src="([^">]+)"', html_text)
             if match:
                 return match.group(1)
 
         return None
 
     def _extract_summary(self, entry):
-        # 1. content:encoded (best, full article when present)
         if entry.get("content"):
             value = entry.content[0].get("value")
             if value:
                 return clean_html(value)
 
-        # 2. summary (many feeds)
         summary = entry.get("summary")
         if summary:
             return clean_html(summary)
 
-        # 3. description (WordPress feeds like Voorwaarheid)
         description = entry.get("description")
         if description:
             return clean_html(description)
@@ -163,16 +147,15 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         await self.async_refresh()
 
     async def _async_update_data(self):
-        _LOGGER.warning("NOSNews update tick (force=%s blocked=%s)",
-                self._force_refresh,
-                self._is_blocked_now())
+        #_LOGGER.warning(
+        #    "NOSNews update tick (force=%s blocked=%s)",
+        #    self._force_refresh,
+        #    self._is_blocked_now(),
+        #)
 
-        # BLOCK FETCH WINDOW
         if not self._force_refresh and self._is_blocked_now():
-            # Return last known data WITHOUT changing state
             return self.data or self._cached_entries
 
-        entries = None
         try:
             entries = await self.hass.async_add_executor_job(self._fetch)
         finally:
@@ -180,21 +163,62 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
             self.last_update = dt_util.now()
 
         if self._dwains_enabled and entries:
-            newest = entries[0]  # Always newest (already sorted desc)
-            newest_id = self._article_id(newest)
+            # ---------------- SUMMARY ---------------- #
+            new_counts: dict[str, int] = {}
 
-            # If nothing has ever been shown → show newest immediately
-            if self._last_shown_published is None:
-                if not self._current_notification_active:
+            for article in entries:
+                article_id = self._article_id(article)
+                if article_id not in {
+                    self._article_id(a) for a in self._cached_entries
+                }:
+                    feed = article.get("feed_name", "Unknown")
+                    new_counts[feed] = new_counts.get(feed, 0) + 1
+
+            if new_counts:
+                message = "\n".join(
+                    f"{feed}: {count} new articles"
+                    for feed, count in new_counts.items()
+                )
+
+                if self.hass.services.has_service(
+                    "dwains_dashboard", "notification_create"
+                ):
+                    await self.hass.services.async_call(
+                        "dwains_dashboard",
+                        "notification_create",
+                        {
+                            "notification_id": (
+                                f"nosnews_{self.entry.entry_id}_summary"
+                            ),
+                            "title": "NOS News: New Articles",
+                            "message": message,
+                        },
+                        blocking=True,
+                    )
+
+                    if not self._current_notification_active:
+                        self._current_notification_active = True
+                else:
+                    _LOGGER.warning(
+                        "Dwains notification service not available for summary"
+                    )
+
+            # ---------------- PER-ARTICLE QUEUE ---------------- #
+            newest = entries[0] if entries else None
+
+            if newest:
+                if self._last_shown_published is None and not new_counts:
                     self.hass.loop.call_soon_threadsafe(
                         lambda: asyncio.create_task(
-                            self._async_create_dwains_notification(newest)
+                            self._async_create_dwains_notification(
+                                newest, is_last=True
+                            )
                         )
                     )
-            else:
-                # Normal case: queue only newer unseen articles
-                self._enqueue_new_articles(entries)
-                self._schedule_show_next()
+                else:
+                    self._enqueue_new_articles(entries)
+                    if not new_counts:
+                        self._schedule_show_next()
 
         self.index = 0
         return entries
@@ -204,6 +228,7 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
             return self._cached_entries
 
         entries = []
+
         for feed_name, url in self.feeds_data.items():
             parsed = feedparser.parse(url)
             for entry in parsed.entries[: self.articles_per_feed]:
@@ -215,7 +240,6 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
                         or "https://www.home-assistant.io/images/favicon-192x192-full.png",
                         "feed_name": feed_name,
                         "summary": self._extract_summary(entry),
-                        "published_parsed": entry.get("published_parsed"),
                         "published": entry.get("published"),
                     }
                 )
@@ -240,7 +264,6 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _enqueue_new_articles(self, entries: list[dict]):
-        """Queue only articles newer than last shown."""
         for article in entries:
             article_id = self._article_id(article)
 
@@ -252,12 +275,13 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
 
             published_ts = parser.parse(article["published"]).timestamp()
 
-            # Only queue NEWER items
             if self._last_shown_published and published_ts <= self._last_shown_published:
                 continue
 
-            # Avoid duplicates already queued
-            if any(self._article_id(a) == article_id for a in self._notification_queue):
+            if any(
+                self._article_id(a) == article_id
+                for a in self._notification_queue
+            ):
                 continue
 
             self._notification_queue.append(article)
@@ -266,19 +290,20 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         async def _show_next(_now=None):
             if self._current_notification_active:
                 return
-
             if not self._notification_queue:
                 return
 
-            # Newest-first
             article = self._notification_queue.popleft()
-            await self._async_create_dwains_notification(article)
+            is_last = not self._notification_queue
+            await self._async_create_dwains_notification(article, is_last)
 
         asyncio.run_coroutine_threadsafe(_show_next(), self.hass.loop)
 
     # ---------------- DWAIN'S ---------------- #
 
-    async def _async_create_dwains_notification(self, article):
+    async def _async_create_dwains_notification(
+        self, article, is_last: bool = False
+    ):
         if (
             not self._dwains_enabled
             or self._current_notification_active
@@ -294,22 +319,29 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         self._current_notification_active = True
 
         if article.get("published"):
-            self._last_shown_published = parser.parse(article["published"]).timestamp()
+            self._last_shown_published = parser.parse(
+                article["published"]
+            ).timestamp()
         else:
             import time
+
             self._last_shown_published = time.time()
 
-        if not self.hass.services.has_service("dwains_dashboard", "notification_create"):
+        if not self.hass.services.has_service(
+            "dwains_dashboard", "notification_create"
+        ):
             _LOGGER.warning("Dwains notification service not available")
             self._current_notification_active = False
             return
 
         published_time = None
         if article.get("published"):
-            dt = parser.parse(article["published"])
-            published_time = dt.strftime("%H:%M")
+            published_time = parser.parse(
+                article["published"]
+            ).strftime("%H:%M")
 
         time_prefix = f"{published_time} – " if published_time else ""
+        suffix = "\n\nLast message" if is_last else ""
 
         await self.hass.services.async_call(
             "dwains_dashboard",
@@ -317,15 +349,22 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
             {
                 "notification_id": f"nosnews_{self.entry.entry_id}",
                 "title": "NOS News",
-                "message": f"{html.escape(article['feed_name'])} | {time_prefix}{article['title']}",
+                "message": (
+                    f"{html.escape(article['feed_name'])} | "
+                    f"{time_prefix}{article['title']}{suffix}",
+                ),
+                "entity_id_format": "dashboard.{}",
             },
             blocking=True,
         )
 
     def _dwains_listener(self, event):
-        """Handle Dwains notification dismissed events."""
-        data = event.data
-        if data.get("notification_id") != f"nosnews_{self.entry.entry_id}":
+        notification_id = event.data.get("notification_id")
+
+        article_id = f"nosnews_{self.entry.entry_id}"
+        summary_id = f"nosnews_{self.entry.entry_id}_summary"
+
+        if notification_id not in (article_id, summary_id):
             return
 
         self._current_notification_active = False
@@ -340,10 +379,8 @@ class NOSNewsCoordinator(DataUpdateCoordinator[list[dict]]):
         if not self.data:
             return []
 
-        unseen = []
-        for article in self.data:
-            article_id = self._article_id(article)
-            if article_id not in self._seen_articles:
-                unseen.append(article)
-
-        return unseen
+        return [
+            article
+            for article in self.data
+            if self._article_id(article) not in self._seen_articles
+        ]
